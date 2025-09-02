@@ -122,3 +122,192 @@ app.post('/api/auth/logout', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`Auth server running on http://localhost:${PORT}`);
 });
+// === Profiles: prepared statements ===
+const getProfileByUserId = db.prepare('SELECT * FROM consultant_profiles WHERE user_id = ?');
+const insertProfile = db.prepare(`
+  INSERT INTO consultant_profiles
+  (user_id, headline, bio, avatar_url, industries, specialties, location, available, hourly_rate, website, linkedin, github, years_experience, updated_at)
+  VALUES (@user_id, @headline, @bio, @avatar_url, @industries, @specialties, @location, @available, @hourly_rate, @website, @linkedin, @github, @years_experience, CURRENT_TIMESTAMP)
+`);
+const updateProfile = db.prepare(`
+  UPDATE consultant_profiles SET
+    headline=@headline,
+    bio=@bio,
+    avatar_url=@avatar_url,
+    industries=@industries,
+    specialties=@specialties,
+    location=@location,
+    available=@available,
+    hourly_rate=@hourly_rate,
+    website=@website,
+    linkedin=@linkedin,
+    github=@github,
+    years_experience=@years_experience,
+    updated_at=CURRENT_TIMESTAMP
+  WHERE user_id=@user_id
+`);
+
+const baseListSql = `
+SELECT
+  u.id as user_id, u.name, u.email,
+  p.headline, p.bio, p.avatar_url, p.industries, p.specialties,
+  p.location, p.available, p.hourly_rate, p.website, p.linkedin, p.github,
+  p.years_experience, p.updated_at
+FROM users u
+LEFT JOIN consultant_profiles p ON p.user_id = u.id
+WHERE u.role = 'consultant'
+`;
+
+// === Profiles: helpers ===
+function sanitizeProfilePayload(body, userId) {
+  // Accept simple CSV for industries/specialties or arrays; store as JSON
+  const toJsonArray = (v) => {
+    if (Array.isArray(v)) return JSON.stringify(v.map(s => String(s).trim()).filter(Boolean));
+    if (typeof v === 'string') {
+      const arr = v.split(',').map(s => s.trim()).filter(Boolean);
+      return JSON.stringify(arr);
+    }
+    return JSON.stringify([]);
+  };
+
+  return {
+    user_id: userId,
+    headline: body.headline?.toString().slice(0, 120) || null,
+    bio: body.bio?.toString().slice(0, 4000) || null,
+    avatar_url: body.avatar_url?.toString().slice(0, 500) || null,
+    industries: toJsonArray(body.industries),
+    specialties: toJsonArray(body.specialties),
+    location: body.location?.toString().slice(0, 120) || null,
+    available: body.available ? 1 : 0,
+    hourly_rate: Number.isFinite(Number(body.hourly_rate)) ? Number(body.hourly_rate) : null,
+    website: body.website?.toString().slice(0, 200) || null,
+    linkedin: body.linkedin?.toString().slice(0, 200) || null,
+    github: body.github?.toString().slice(0, 200) || null,
+    years_experience: Number.isFinite(Number(body.years_experience)) ? Number(body.years_experience) : null
+  };
+}
+
+function publicizeProfile(row) {
+  // Convert JSON strings back to arrays, hide sensitive fields if needed later
+  const parseJson = (s) => {
+    try { return s ? JSON.parse(s) : []; } catch { return []; }
+  };
+  return {
+    user_id: row.user_id,
+    name: row.name,
+    email: row.email,
+    headline: row.headline,
+    bio: row.bio,
+    avatar_url: row.avatar_url,
+    industries: parseJson(row.industries),
+    specialties: parseJson(row.specialties),
+    location: row.location,
+    available: !!row.available,
+    hourly_rate: row.hourly_rate,
+    website: row.website,
+    linkedin: row.linkedin,
+    github: row.github,
+    years_experience: row.years_experience,
+    updated_at: row.updated_at
+  };
+}
+
+// === Profiles: routes ===
+
+// Upsert current consultant profile
+app.post('/api/consultants/profile', authRequired, (req, res) => {
+  try {
+    const uid = req.user.sub;
+    // Only consultants can upsert (adjust as needed)
+    if (req.user.role !== 'consultant' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const existing = getProfileByUserId.get(uid);
+    const payload = sanitizeProfilePayload(req.body, uid);
+
+    if (existing) {
+      updateProfile.run(payload);
+    } else {
+      insertProfile.run(payload);
+    }
+    const row = db.prepare(baseListSql + ' AND u.id = ?').get(uid);
+    return res.json({ profile: publicizeProfile(row) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Profile upsert failed' });
+  }
+});
+
+// Get my profile
+app.get('/api/consultants/me', authRequired, (req, res) => {
+  try {
+    const uid = req.user.sub;
+    const row = db.prepare(baseListSql + ' AND u.id = ?').get(uid);
+    if (!row) return res.status(404).json({ error: 'Profile not found' });
+    return res.json({ profile: publicizeProfile(row) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Fetch failed' });
+  }
+});
+
+// Public: get profile by consultant user id
+app.get('/api/consultants/:id', (req, res) => {
+  try {
+    const row = db.prepare(baseListSql + ' AND u.id = ?').get(Number(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    return res.json({ profile: publicizeProfile(row) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Fetch failed' });
+  }
+});
+
+// Public: list consultants with filters and pagination
+app.get('/api/consultants', (req, res) => {
+  try {
+    const { q, industry, location, available, limit = 20, offset = 0 } = req.query;
+    const where = [];
+    const params = [];
+
+    if (q) {
+      where.push('(u.name LIKE ? OR p.bio LIKE ? OR p.headline LIKE ?)');
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    }
+    if (industry) {
+      // JSON string contains check (simple LIKE for MVP)
+      where.push('p.industries LIKE ?');
+      params.push(`%${industry}%`);
+    }
+    if (location) {
+      where.push('p.location LIKE ?');
+      params.push(`%${location}%`);
+    }
+    if (available === '1' || available === '0') {
+      where.push('p.available = ?');
+      params.push(Number(available));
+    }
+
+    const sql =
+      baseListSql +
+      (where.length ? ` AND ${where.join(' AND ')}` : '') +
+      ' ORDER BY p.updated_at DESC NULLS LAST, u.created_at DESC ' +
+      ' LIMIT ? OFFSET ?';
+
+    const rows = db.prepare(sql).all(...params, Number(limit), Number(offset));
+    const items = rows.map(publicizeProfile);
+
+    // Simple count (not exact if filters complex, good enough for MVP)
+    const countSql =
+      'SELECT COUNT(*) as c FROM (' +
+      baseListSql +
+      (where.length ? ` AND ${where.join(' AND ')}` : '') +
+      ')';
+    const total = db.prepare(countSql).get(...params).c;
+
+    res.json({ items, total, limit: Number(limit), offset: Number(offset) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'List failed' });
+  }
+});
