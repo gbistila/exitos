@@ -72,3 +72,26 @@ export default function Dashboard() {
     ))}
   </ul>
 </section>
+const [requests, setRequests] = useState<any[]>([]);
+
+useEffect(() => {
+  (async () => {
+    const res = await fetch(`${API}/api/consultants/requests`, { credentials: 'include' });
+    if (res.ok) {
+      const data = await res.json();
+      setRequests(data.requests);
+    }
+  })();
+}, []);
+
+async function respond(id: number, status: 'accepted' | 'declined') {
+  await fetch(`${API}/api/consultants/requests/${id}/respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ status })
+  });
+  setRequests((prev) =>
+    prev.map((r) => (r.id === id ? { ...r, status } : r))
+  );
+}
