@@ -311,3 +311,48 @@ app.get('/api/consultants', (req, res) => {
     res.status(500).json({ error: 'List failed' });
   }
 });
+const createIntroRequest = db.prepare(`
+  INSERT INTO intro_requests (consultant_id, sender_name, sender_email, message)
+  VALUES (?, ?, ?, ?)
+`);
+
+const getRequestsForConsultant = db.prepare(`
+  SELECT * FROM intro_requests WHERE consultant_id = ? ORDER BY created_at DESC
+`);
+
+const updateRequestStatus = db.prepare(`
+  UPDATE intro_requests SET status = ? WHERE id = ? AND consultant_id = ?
+`);
+
+// Create intro request (public)
+app.post('/api/consultants/:id/request-intro', async (req, res) => {
+  try {
+    const { sender_name, sender_email, message } = req.body;
+    const consultantId = Number(req.params.id);
+    if (!sender_name || !sender_email) return res.status(400).json({ error: 'Missing fields' });
+
+    createIntroRequest.run(consultantId, sender_name, sender_email, message || '');
+    res.status(201).json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Intro request failed' });
+  }
+});
+
+// Consultant views incoming requests
+app.get('/api/consultants/requests', authRequired, (req, res) => {
+  if (req.user.role !== 'consultant') return res.status(403).json({ error: 'Forbidden' });
+  const rows = getRequestsForConsultant.all(req.user.sub);
+  res.json({ requests: rows });
+});
+
+// Consultant responds to request
+app.post('/api/consultants/requests/:id/respond', authRequired, (req, res) => {
+  if (req.user.role !== 'consultant') return res.status(403).json({ error: 'Forbidden' });
+  const { status } = req.body;
+  const valid = ['accepted', 'declined'];
+  if (!valid.includes(status)) return res.status(400).json({ error: 'Invalid status' });
+
+  updateRequestStatus.run(status, Number(req.params.id), req.user.sub);
+  res.json({ ok: true });
+});
