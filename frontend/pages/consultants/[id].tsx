@@ -2,6 +2,7 @@
 import { useRouter } from 'next/router';
 import { useEffect, useState } from 'react';
 
+
 const API = process.env.NEXT_PUBLIC_API_BASE_URL;
 
 type Profile = {
@@ -106,6 +107,28 @@ export default function ConsultantDetail() {
   <form
     onSubmit={async (e) => {
       e.preventDefault();
+      const res = await fetch(`${API}/api/consultants/${id}/request-intro`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sender_name: prompt('Your name'),
+          sender_email: prompt('Your email'),
+          message: prompt('Brief message (optional)')
+        })
+      });
+      if (res.ok) alert('Intro request sent!');
+      else alert('Failed to send request.');
+    }}
+  >
+    <button type="submit">Request Intro</button>
+  </form>
+</section>
+<section style={{ marginTop: 30 }}>
+  <h2>Request Intro</h2>
+  <form
+    onSubmit={async (e) => {
+      e.preventDefault();
+      if (!id) return;
       const res = await fetch(`${API}/api/consultants/${id}/request-intro`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
