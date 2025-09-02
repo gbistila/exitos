@@ -356,3 +356,121 @@ app.post('/api/consultants/requests/:id/respond', authRequired, (req, res) => {
   updateRequestStatus.run(status, Number(req.params.id), req.user.sub);
   res.json({ ok: true });
 });
+// --- Prepared statements for intro requests/workspaces ---
+const getIntroRequestById = db.prepare('SELECT * FROM intro_requests WHERE id = ? AND consultant_id = ?');
+const linkRequestToWorkspace = db.prepare('UPDATE intro_requests SET status = ?, workspace_id = ? WHERE id = ? AND consultant_id = ?');
+const createWorkspaceStmt = db.prepare(`
+  INSERT INTO workspaces (consultant_id, seller_name, seller_email, status)
+  VALUES (?, ?, ?, 'active')
+`);
+const listWorkspacesByConsultant = db.prepare(`
+  SELECT * FROM workspaces WHERE consultant_id = ? ORDER BY created_at DESC
+`);
+const getWorkspaceById = db.prepare(`
+  SELECT * FROM workspaces WHERE id = ?
+`);
+
+const createTaskStmt = db.prepare(`
+  INSERT INTO workspace_tasks (workspace_id, title, description, status, assigned_to, due_date)
+  VALUES (@workspace_id, @title, @description, @status, @assigned_to, @due_date)
+`);
+const listTasksStmt = db.prepare('SELECT * FROM workspace_tasks WHERE workspace_id = ? ORDER BY created_at DESC');
+const updateTaskStatusStmt = db.prepare('UPDATE workspace_tasks SET status = ? WHERE id = ? AND workspace_id = ?');
+
+const createMessageStmt = db.prepare(`
+  INSERT INTO workspace_messages (workspace_id, author, body)
+  VALUES (?, ?, ?)
+`);
+const listMessagesStmt = db.prepare('SELECT * FROM workspace_messages WHERE workspace_id = ? ORDER BY created_at ASC');
+
+// --- Helper: ensure consultant owns workspace ---
+function assertConsultantWorkspace(req, res, next) {
+  const wid = Number(req.params.id);
+  const ws = getWorkspaceById.get(wid);
+  if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+  if (req.user.role !== 'consultant' || ws.consultant_id !== req.user.sub) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  req.workspace = ws;
+  next();
+}
+
+// --- Modify respond endpoint to create workspace on accept ---
+app.post('/api/consultants/requests/:id/respond', authRequired, (req, res) => {
+  if (req.user.role !== 'consultant') return res.status(403).json({ error: 'Forbidden' });
+  const { status } = req.body;
+  const valid = ['accepted', 'declined'];
+  if (!valid.includes(status)) return res.status(400).json({ error: 'Invalid status' });
+
+  const reqId = Number(req.params.id);
+  const intro = getIntroRequestById.get(reqId, req.user.sub);
+  if (!intro) return res.status(404).json({ error: 'Request not found' });
+
+  let workspace_id = intro.workspace_id;
+
+  if (status === 'accepted' && !workspace_id) {
+    const info = createWorkspaceStmt.run(req.user.sub, intro.sender_name, intro.sender_email);
+    workspace_id = info.lastInsertRowid;
+  }
+
+  linkRequestToWorkspace.run(status, workspace_id || null, reqId, req.user.sub);
+  res.json({ ok: true, workspace_id });
+});
+
+// --- List my workspaces (consultant) ---
+app.get('/api/workspaces', authRequired, (req, res) => {
+  if (req.user.role !== 'consultant') return res.status(403).json({ error: 'Forbidden' });
+  const rows = listWorkspacesByConsultant.all(req.user.sub);
+  res.json({ items: rows });
+});
+
+// --- Get workspace details ---
+app.get('/api/workspaces/:id', authRequired, assertConsultantWorkspace, (req, res) => {
+  res.json({ workspace: req.workspace });
+});
+
+// --- Tasks: list ---
+app.get('/api/workspaces/:id/tasks', authRequired, assertConsultantWorkspace, (req, res) => {
+  const tasks = listTasksStmt.all(req.workspace.id);
+  res.json({ items: tasks });
+});
+
+// --- Tasks: create ---
+app.post('/api/workspaces/:id/tasks', authRequired, assertConsultantWorkspace, (req, res) => {
+  const { title, description, assigned_to = 'consultant', due_date = null } = req.body;
+  if (!title) return res.status(400).json({ error: 'Title required' });
+
+  const payload = {
+    workspace_id: req.workspace.id,
+    title: String(title).slice(0, 200),
+    description: description ? String(description).slice(0, 4000) : null,
+    status: 'todo',
+    assigned_to: ['consultant', 'seller'].includes(assigned_to) ? assigned_to : 'consultant',
+    due_date
+  };
+  const info = createTaskStmt.run(payload);
+  res.status(201).json({ id: info.lastInsertRowid });
+});
+
+// --- Tasks: update status ---
+app.patch('/api/workspaces/:id/tasks/:taskId', authRequired, assertConsultantWorkspace, (req, res) => {
+  const valid = ['todo', 'in_progress', 'done'];
+  const { status } = req.body;
+  if (!valid.includes(status)) return res.status(400).json({ error: 'Invalid status' });
+  updateTaskStatusStmt.run(status, Number(req.params.taskId), req.workspace.id);
+  res.json({ ok: true });
+});
+
+// --- Messages: list ---
+app.get('/api/workspaces/:id/messages', authRequired, assertConsultantWorkspace, (req, res) => {
+  const msgs = listMessagesStmt.all(req.workspace.id);
+  res.json({ items: msgs });
+});
+
+// --- Messages: create ---
+app.post('/api/workspaces/:id/messages', authRequired, assertConsultantWorkspace, (req, res) => {
+  const { body } = req.body;
+  if (!body) return res.status(400).json({ error: 'Message required' });
+  createMessageStmt.run(req.workspace.id, 'consultant', String(body).slice(0, 4000));
+  res.status(201).json({ ok: true });
+});
