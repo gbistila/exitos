@@ -36,4 +36,16 @@ CREATE INDEX IF NOT EXISTS idx_profiles_location ON consultant_profiles(location
 `);
 
 module.exports = db;
+db.exec(`
+CREATE TABLE IF NOT EXISTS intro_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  consultant_id INTEGER NOT NULL,
+  sender_name TEXT NOT NULL,
+  sender_email TEXT NOT NULL,
+  message TEXT,
+  status TEXT DEFAULT 'pending',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (consultant_id) REFERENCES users(id)
+);
+`);
 
