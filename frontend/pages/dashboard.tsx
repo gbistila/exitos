@@ -54,3 +54,21 @@ export default function Dashboard() {
     </main>
   );
 }
+<section style={{ marginTop: 40 }}>
+  <h2>Intro Requests</h2>
+  <ul>
+    {requests.map((r) => (
+      <li key={r.id} style={{ marginBottom: 12 }}>
+        <strong>{r.sender_name}</strong> ({r.sender_email})<br />
+        <em>{r.message}</em><br />
+        Status: {r.status}
+        {r.status === 'pending' && (
+          <>
+            <button onClick={() => respond(r.id, 'accepted')}>Accept</button>
+            <button onClick={() => respond(r.id, 'declined')}>Decline</button>
+          </>
+        )}
+      </li>
+    ))}
+  </ul>
+</section>
